@@ -249,17 +249,6 @@ main(int argc, char **argv)
 		        "Check the configuration file.\n");
 		exit(ERR_BAD_CONFIG);
 	}
-	
-	/*
-	 * Read the configuration file: repmgr.conf
-	 */
-	parse_config(config_file, &config);
-	if (config.node == -1)
-	{
-		fprintf(stderr, "Node information is missing. "
-		        "Check the configuration file.\n");
-		exit(1);
-	}
 
 	keywords[2] = "user";
 	values[2] = runtime_options.username;
