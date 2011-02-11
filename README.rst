@@ -126,6 +126,61 @@ path either.  The following recipe should work::
 
   sudo PATH="/usr/pgsql-9.0/bin:$PATH" make USE_PGXS=1 install
 
+Issues with 32 and 64 bit RPMs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If when building, you receive a series of errors of this form::
+
+  /usr/bin/ld: skipping incompatible /usr/pgsql-9.0/lib/libpq.so when searching for -lpq
+
+This is likely because you have both the 32 and 64 bit versions of the
+``postgresql90-devel`` package installed.  You can check that like this::
+
+  rpm -qa --queryformat '%{NAME}\t%{ARCH}\n'  | grep postgresql90-devel
+
+And if two packages appear, one for i386 and one for x86_64, that's not supposed
+to be allowed.
+
+This can happen when using the PGDG repo to install that package;
+here is an example sessions demonstrating the problem case appearing::
+
+  # yum install postgresql-devel
+  ..
+  Setting up Install Process
+  Resolving Dependencies
+  --> Running transaction check
+  ---> Package postgresql90-devel.i386 0:9.0.2-2PGDG.rhel5 set to be updated
+  ---> Package postgresql90-devel.x86_64 0:9.0.2-2PGDG.rhel5 set to be updated
+  --> Finished Dependency Resolution
+  
+  Dependencies Resolved
+
+  =========================================================================
+   Package               Arch      Version              Repository    Size
+  =========================================================================
+  Installing:
+   postgresql90-devel    i386      9.0.2-2PGDG.rhel5    pgdg90        1.5 M
+   postgresql90-devel    x86_64    9.0.2-2PGDG.rhel5    pgdg90        1.6 M
+
+Note how both the i386 and x86_64 platform architectures are selected for
+installation.  Your main PostgreSQL package will only be compatible with one of
+those, and if the repmgr build finds the wrong postgresql90-devel these
+"skipping incompatible" messages appear.
+
+In this case, you can temporarily remove both packages, then just install the
+correct one for your architecture.  Example::
+
+  rpm -e postgresql90-devel --allmatches
+  yum install postgresql90-devel-9.0.2-2PGDG.rhel5.x86_64
+
+Instead just deleting the package from the wrong platform might not leave behind
+the correct files, due to the way in which these accidentally happen to interact.
+If you already tried to build repmgr before doing this, you'll need to do::
+
+    make USE_PGXS=1 clean
+
+To get rid of leftover files from the wrong architecture.
+
 Notes on Ubuntu, Debian or other Debian-based Builds
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -155,6 +210,13 @@ alternate for repmgr and repmgrd::
   sudo update-alternatives --install /usr/bin/repmgr repmgr /usr/lib/postgresql/9.0/bin/repmgr 10
   sudo update-alternatives --install /usr/bin/repmgrd repmgrd /usr/lib/postgresql/9.0/bin/repmgrd 10
 
+You can also make a deb package of repmgr using::
+
+  make USE_PGXS=1 deb
+
+This will build a Debian package one level up from where you build, normally the 
+same directory that you have your repmgr/ directory in.
+
 Confirm software was built correctly
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -164,11 +226,17 @@ is available by checking its version::
 
   repmgr --version
   repmgrd --version
-    
-You may need to include the full path of the binary instead, such as this RHEL example::
+
+You may need to include the full path of the binary instead, such as this
+RHEL example::
 
   /usr/pgsql-9.0/bin/repmgr --version
   /usr/pgsql-9.0/bin/repmgrd --version
+
+Or in this Debian example::
+
+  /usr/lib/postgresql/9.0/bin/repmgr --version
+  /usr/lib/postgresql/9.0/bin/repmgrd --version
 
 Below this binary installation base directory is referred to as PGDIR.
 
@@ -239,6 +307,8 @@ access to that user::
 If you give a password to the user, you need to create a ``.pgpass`` file for
 them as well to allow automatic login.  In this case you might use the
 ``md5`` authentication method instead of ``trust`` for the repmgr user.
+
+Don't forget to restart the database server after making all these changes.
 
 Configuration File
 ==================
@@ -469,6 +539,23 @@ and the same in the standby.
 The repmgr daemon creates 2 connections: one to the master and another to the
 standby.
 
+Error codes
+===========
+
+When the repmgr or repmgrd program exits, it will set one of the
+following 
+
+* SUCCESS 0:  Program ran successfully.
+
+* ERR_BAD_CONFIG 1:  One of the configuration checks the program makes failed.
+* ERR_BAD_RSYNC 2:  An rsync call made by the program returned an error.
+* ERR_STOP_BACKUP 3:  A ``pg_stop_backup()`` call made by the program didn't succeed.
+* ERR_NO_RESTART 4:  An attempt to restart a PostgreSQL instance failed.
+* ERR_NEEDS_XLOG 5:  Could note create the ``pg_xlog`` directory when cloning.
+* ERR_DB_CON 6:  Error when trying to connect to a database.
+* ERR_DB_QUERY 7:  Error executing a database query.
+* ERR_PROMOTED 8:  Exiting program because the node has been promoted to master.
+
 Detailed walkthrough
 ====================
 
@@ -552,13 +639,13 @@ and it should contain::
 
   cluster=test
   node=1
-  conninfo='host=127.0.0.1 dbname=dbtest'
+  conninfo='host=127.0.0.1 dbname=testdb'
 
 On “standby" create the file ``/home/standby/repmgr/repmgr.conf`` with::
 
   cluster=test
   node=2
-  conninfo='host=127.0.0.1 dbname=dbtest'
+  conninfo='host=127.0.0.1 dbname=testdb'
 
 Next, with “prime" server running, we want to use the ``clone standby`` command
 in repmgr to copy over the entire PostgreSQL database cluster onto the
@@ -622,7 +709,7 @@ Bringing the former Primary up as a Standby
 To make the former primary act as a standby, which is necessary before
 restoring the original roles, type::
 
-  repmgr -U standby -R prime -h 127.0.0.1 -p 5433 -d dbtest --force --verbose standby clone
+  repmgr -U standby -R prime -h 127.0.0.1 -p 5433 -d testdb --force --verbose standby clone
 
 Stop and restart the “prime" server, which is now acting as a standby server.
 
@@ -659,7 +746,7 @@ License and Contributions
 =========================
 
 repmgr is licensed under the GPL v3.  All of its code and documentation is
-Copyright 2010, 2ndQuadrant Limited.  See the files COPYRIGHT and LICENSE for
+Copyright 2010-2011, 2ndQuadrant Limited.  See the files COPYRIGHT and LICENSE for
 details.
 
 Contributions to repmgr are welcome, and listed in the file CREDITS.
@@ -668,3 +755,13 @@ assignment and a disclaimer of any work-for-hire ownership claims from the
 employer of the developer.  This lets us make sure that all of the repmgr
 distribution remains free code.  Please contact info@2ndQuadrant.com for a
 copy of the relevant Copyright Assignment Form.
+
+Code style
+----------
+
+Code in repmgr is formatted to a consistent style using the following command::
+
+  astyle --style=ansi --indent=tab --suffix=none *.c *.h
+
+Contributors should reformat their code similarly before submitting code to
+the project, in order to minimize merge conflicts with other work.

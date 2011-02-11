@@ -1,6 +1,6 @@
 /*
  * check_dir.h
- * Copyright (c) 2ndQuadrant, 2010
+ * Copyright (c) 2ndQuadrant, 2010-2011
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,7 +17,12 @@
  *
  */
 
+#ifndef _REPMGR_CHECK_DIR_H_
+#define _REPMGR_CHECK_DIR_H_
+
 int  check_dir(char *dir);
 bool create_directory(char *dir);
 bool set_directory_permissions(char *dir);
 bool is_pg_dir(char *dir);
+
+#endif

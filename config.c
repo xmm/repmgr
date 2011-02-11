@@ -1,6 +1,6 @@
 /*
  * config.c - Functions to parse the config file
- * Copyright (C) 2ndQuadrant, 2010
+ * Copyright (C) 2ndQuadrant, 2010-2011
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,12 +17,10 @@
  *
  */
 
-#include "repmgr.h"
-
-#define MAXLINELENGTH	4096
+#include "config.h"
 
 void
-parse_config(const char *config_file, repmgr_config *config)
+parse_config(const char* config_file, t_configuration_options* options)
 {
 	char *s, buff[MAXLINELENGTH];
 	char name[MAXLEN];
@@ -30,17 +28,18 @@ parse_config(const char *config_file, repmgr_config *config)
 
 	FILE *fp = fopen (config_file, "r");
 
-	if (fp == NULL) {
+	if (fp == NULL)
+	{
 		fprintf(stderr, _("Could not find configuration file '%s'\n"), config_file);
-		exit(1);
+		exit(ERR_BAD_CONFIG);
 	}
-	
+
 	/* Initialize */
-	memset(config->cluster_name, 0, sizeof(config->cluster_name));
-	config->node = -1;
-	memset(config->conninfo, 0, sizeof(config->conninfo));
-	memset(config->rsync_options, 0, sizeof(config->rsync_options));
-	
+	memset(options->cluster_name, 0, sizeof(options->cluster_name));
+	options->node = -1;
+	memset(options->conninfo, 0, sizeof(options->conninfo));
+	memset(options->rsync_options, 0, sizeof(options->rsync_options));
+
 	/* Read next line */
 	while ((s = fgets (buff, sizeof buff, fp)) != NULL)
 	{
@@ -53,13 +52,17 @@ parse_config(const char *config_file, repmgr_config *config)
 
 		/* Copy into correct entry in parameters struct */
 		if (strcmp(name, "cluster") == 0)
-			strncpy (config->cluster_name, value, MAXLEN);
+			strncpy (options->cluster_name, value, MAXLEN);
 		else if (strcmp(name, "node") == 0)
-			config->node = atoi(value);
+			options->node = atoi(value);
 		else if (strcmp(name, "conninfo") == 0)
-			strncpy (config->conninfo, value, MAXLEN);
+			strncpy (options->conninfo, value, MAXLEN);
 		else if (strcmp(name, "rsync_options") == 0)
-			strncpy (config->rsync_options, value, QUERY_STR_LEN);
+			strncpy (options->rsync_options, value, QUERY_STR_LEN);
+		else if (strcmp(name, "loglevel") == 0)
+			strncpy (options->loglevel, value, MAXLEN);
+		else if (strcmp(name, "logfacility") == 0)
+			strncpy (options->logfacility, value, MAXLEN);
 		else
 			printf ("WARNING: %s/%s: Unknown name/value pair!\n", name, value);
 	}
@@ -68,18 +71,18 @@ parse_config(const char *config_file, repmgr_config *config)
 	fclose (fp);
 
 	/* Check config settings */
-	if (strnlen(config->cluster_name, MAXLEN)==0)
+	if (strnlen(options->cluster_name, MAXLEN)==0)
 	{
 		fprintf(stderr, "Cluster name is missing. "
 		        "Check the configuration file.\n");
-		exit(1);
+		exit(ERR_BAD_CONFIG);
 	}
 
-	if (config->node == -1)
+	if (options->node == -1)
 	{
 		fprintf(stderr, "Node information is missing. "
 		        "Check the configuration file.\n");
-		exit(1);
+		exit(ERR_BAD_CONFIG);
 	}
 }
 

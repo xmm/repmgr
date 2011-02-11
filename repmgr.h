@@ -1,6 +1,6 @@
 /*
  * repmgr.h
- * Copyright (c) 2ndQuadrant, 2010
+ * Copyright (c) 2ndQuadrant, 2010-2011
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,15 +26,53 @@
 
 #include "dbutils.h"
 
-
 #define PRIMARY_MODE		0
 #define STANDBY_MODE		1
 
-#define MAXLEN				80
-#define CONFIG_FILE			"repmgr.conf"
+#define MAXLEN			80
 #define MAXVERSIONSTR		16
 #define QUERY_STR_LEN		8192
 
 #include "config.h"
+#define MAXFILENAME		1024
+#define MAXLINELENGTH	4096
+#define ERRBUFF_SIZE		512
+
+#define DEFAULT_CONFIG_FILE		"./repmgr.conf"
+#define DEFAULT_WAL_KEEP_SEGMENTS	"5000"
+#define DEFAULT_DEST_DIR		"."
+#define DEFAULT_MASTER_PORT		"5432"
+#define DEFAULT_DBNAME			"postgres"
+#define DEFAULT_REPMGR_SCHEMA_PREFIX	"repmgr_"
+
+/* Exit return code */
+
+#define SUCCESS 0
+#define ERR_BAD_CONFIG 1
+#define ERR_BAD_RSYNC 2
+#define ERR_STOP_BACKUP 3
+#define ERR_NO_RESTART 4
+#define ERR_NEEDS_XLOG 5
+#define ERR_DB_CON 6
+#define ERR_DB_QUERY 7
+#define ERR_PROMOTED 8
+
+/* Run time options type */
+typedef struct
+{
+
+	char dbname[MAXLEN];
+	char host[MAXLEN];
+	char username[MAXLEN];
+	char dest_dir[MAXFILENAME];
+	char config_file[MAXFILENAME];
+	char remote_user[MAXLEN];
+	char wal_keep_segments[MAXLEN];
+	bool verbose;
+	bool force;
+
+	char masterport[MAXLEN];
+
+} t_runtime_options;
 
 #endif

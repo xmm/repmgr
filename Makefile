@@ -1,9 +1,9 @@
 #
 # Makefile
-# Copyright (c) 2ndQuadrant, 2010
+# Copyright (c) 2ndQuadrant, 2010-2011
 
-repmgrd_OBJS = dbutils.o config.o repmgrd.o
-repmgr_OBJS = dbutils.o check_dir.o config.o repmgr.o
+repmgrd_OBJS = dbutils.o config.o repmgrd.o log.o
+repmgr_OBJS = dbutils.o check_dir.o config.o repmgr.o log.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 PG_LIBS = $(libpq_pgport)
@@ -34,3 +34,10 @@ clean:
 	rm -f *.o
 	rm -f repmgrd
 	rm -f repmgr
+
+deb: repmgrd repmgr
+	mkdir -p ./debian/usr/bin
+	cp repmgrd repmgr ./debian/usr/bin/
+	dpkg-deb --build debian
+	mv debian.deb ../postgresql-repmgr-9.0_1.0.0.deb
+

@@ -1,6 +1,6 @@
 /*
  * config.h
- * Copyright (c) 2ndQuadrant, 2010
+ * Copyright (c) 2ndQuadrant, 2010-2011
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,14 +17,23 @@
  *
  */
 
+#ifndef _REPMGR_CONFIG_H_
+#define _REPMGR_CONFIG_H_
+
+#include "repmgr.h"
+
 typedef struct
 {
-    char cluster_name[MAXLEN];
-    int node;
-    char conninfo[MAXLEN];
-    char rsync_options[QUERY_STR_LEN];
-} repmgr_config;
+	char cluster_name[MAXLEN];
+	int node;
+	char conninfo[MAXLEN];
+	char loglevel[MAXLEN];
+	char logfacility[MAXLEN];
+	char rsync_options[QUERY_STR_LEN];
+} t_configuration_options;
 
-void parse_config(const char *config_file, repmgr_config *config);
+void parse_config(const char* config_file, t_configuration_options* options);
 void parse_line(char *buff, char *name, char *value);
 char *trim(char *s);
+
+#endif
