@@ -34,20 +34,22 @@
 #include "log.h"
 #include "config.h"
 #include "check_dir.h"
+#include "strutil.h"
 
 #define RECOVERY_FILE "recovery.conf"
 #define RECOVERY_DONE_FILE "recovery.done"
 
-#define NO_ACTION        0		/* Not a real action, just to initialize */
-#define MASTER_REGISTER  1
+#define NO_ACTION		 0		/* Not a real action, just to initialize */
+#define MASTER_REGISTER	 1
 #define STANDBY_REGISTER 2
 #define STANDBY_CLONE 	 3
 #define STANDBY_PROMOTE  4
 #define STANDBY_FOLLOW 	 5
 
 static void help(const char *progname);
-static bool create_recovery_file(const char *data_dir);
-static int  copy_remote_files(char *host, char *remote_user, char *remote_path, char *local_path, bool is_directory);
+static bool create_recovery_file(const char *data_dir, char *master_conninfo);
+static int	copy_remote_files(char *host, char *remote_user, char *remote_path,
+                             char *local_path, bool is_directory);
 static bool check_parameters_for_action(const int action);
 
 static void do_master_register(void);
@@ -64,6 +66,9 @@ static const char *keywords[6];
 static const char *values[6];
 char repmgr_schema[MAXLEN];
 bool need_a_node = true;
+
+/* XXX This should be mapped into a command line option */
+bool require_password = false;
 
 /* Initialization of runtime options */
 t_runtime_options runtime_options = { "", "", "", "", "", "", DEFAULT_WAL_KEEP_SEGMENTS, false, false, "" };
@@ -111,7 +116,8 @@ main(int argc, char **argv)
 	}
 
 
-	while ((c = getopt_long(argc, argv, "d:h:p:U:D:f:R:w:F:v", long_options, &optindex)) != -1)
+	while ((c = getopt_long(argc, argv, "d:h:p:U:D:f:R:w:F:v", long_options,
+	                        &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -164,7 +170,8 @@ main(int argc, char **argv)
 	if (optind < argc)
 	{
 		server_mode = argv[optind++];
-		if (strcasecmp(server_mode, "STANDBY") != 0 && strcasecmp(server_mode, "MASTER") != 0)
+		if (strcasecmp(server_mode, "STANDBY") != 0 &&
+		        strcasecmp(server_mode, "MASTER") != 0)
 		{
 			usage();
 			exit(ERR_BAD_CONFIG);
@@ -207,7 +214,7 @@ main(int argc, char **argv)
 		{
 			if (runtime_options.host[0])
 			{
-				log_err(_("Conflicting parameters you can't use -h while providing a node separately.\n"));
+				log_err(_("Conflicting parameters:  you can't use -h while providing a node separately.\n"));
 				usage();
 				exit(ERR_BAD_CONFIG);
 			}
@@ -220,7 +227,7 @@ main(int argc, char **argv)
 	case 0:
 		break;
 	default:
-		log_err(_("%s: too many command-line arguments (first is \"%s\")\n"),
+		log_err(_("%s: too many command-line arguments (first extra is \"%s\")\n"),
 		        progname, argv[optind + 1]);
 		usage();
 		exit(ERR_BAD_CONFIG);
@@ -239,16 +246,14 @@ main(int argc, char **argv)
 			strncpy(runtime_options.dbname, DEFAULT_DBNAME, MAXLEN);
 	}
 
-	/*
-	 * Read the configuration file: repmgr.conf
-	 */
+	/* Read the configuration file, normally repmgr.conf */
+	if (!runtime_options.config_file[0])
+		strncpy(runtime_options.config_file, DEFAULT_CONFIG_FILE, MAXLEN);
+
+	if (runtime_options.verbose)
+		printf(_("Opening configuration file: %s\n"), runtime_options.config_file);
+
 	parse_config(runtime_options.config_file, &options);
-	if (options.node == -1)
-	{
-		fprintf(stderr, "Node information is missing. "
-		        "Check the configuration file.\n");
-		exit(ERR_BAD_CONFIG);
-	}
 
 	keywords[2] = "user";
 	values[2] = runtime_options.username;
@@ -259,30 +264,31 @@ main(int argc, char **argv)
 	keywords[5] = NULL;
 	values[5] = NULL;
 
-	if (!runtime_options.config_file[0])
-		strncpy(runtime_options.config_file, DEFAULT_CONFIG_FILE, MAXLEN);
+	/*
+	 * Initialize the logger.  If verbose command line parameter was
+	 * input, make sure that the log level is at least INFO.  This
+	 * is mainly useful for STANDBY CLONE.  That doesn't require a
+	 * configuration file where a logging level might be specified
+	 * at, but it often requires detailed logging to troubleshoot
+	 * problems.
+	 */
+	logger_init(progname, options.loglevel, options.logfacility);
+	if (runtime_options.verbose)
+		logger_min_verbose(LOG_INFO);
 
 	/*
-	 * Read the configuration file: repmgr.conf
+	 * Node configuration information is not needed for all actions,
+	 * with STANDBY CLONE being the main exception.
 	 */
-	if (runtime_options.verbose)
-		printf(_("Opening configuration file: %s\n"), runtime_options.config_file);
-
-	parse_config(runtime_options.config_file, &options);
-
 	if (need_a_node)
 	{
-
 		if (options.node == -1)
 		{
 			log_err("Node information is missing. "
 			        "Check the configuration file.\n");
 			exit(ERR_BAD_CONFIG);
 		}
-
 	}
-
-	logger_init(progname, options.loglevel, options.logfacility);
 
 	/* Prepare the repmgr schema variable */
 	snprintf(repmgr_schema, MAXLEN, "%s%s", DEFAULT_REPMGR_SCHEMA_PREFIX, options.cluster_name);
@@ -313,20 +319,21 @@ main(int argc, char **argv)
 	return 0;
 }
 
-
 static void
 do_master_register(void)
 {
-	PGconn 		*conn;
+	PGconn		*conn;
 	PGresult	*res;
 	char 		sqlquery[QUERY_STR_LEN];
 
 	bool		schema_exists = false;
+	char		schema_quoted[MAXLEN];
 	char 		master_version[MAXVERSIONSTR];
 
 	conn = establishDBConnection(options.conninfo, true);
 
 	/* master should be v9 or better */
+	log_info(_("%s connecting to master database\n"), progname);
 	pg_version(conn, master_version);
 	if (strcmp(master_version, "") == 0)
 	{
@@ -336,6 +343,7 @@ do_master_register(void)
 	}
 
 	/* Check we are a master */
+	log_info(_("%s connected to master, checking its state\n"), progname);
 	if (is_standby(conn))
 	{
 		log_err(_("%s needs master to be PostgreSQL 9.0 or better\n"), progname);
@@ -343,8 +351,22 @@ do_master_register(void)
 		exit(ERR_BAD_CONFIG);
 	}
 
+	/* Assemble a quoted schema name
+	 * XXX This is not currently used due to a merge conflict, but
+	 * probably should be */
+	if (false)
+	{
+		char *identifier = PQescapeIdentifier(conn, repmgr_schema,
+		                                      strlen(repmgr_schema));
+
+		maxlen_snprintf(schema_quoted, "%s", identifier);
+		PQfreemem(identifier);
+	}
+
 	/* Check if there is a schema for this cluster */
-	snprintf(sqlquery, QUERY_STR_LEN, "SELECT 1 FROM pg_namespace WHERE nspname = '%s'", repmgr_schema);
+	sqlquery_snprintf(sqlquery,
+	                  "SELECT 1 FROM pg_namespace "
+	                  "WHERE nspname = '%s'", repmgr_schema);
 	log_debug("master register: %s\n", sqlquery);
 	res = PQexec(conn, sqlquery);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -370,10 +392,10 @@ do_master_register(void)
 
 	if (!schema_exists)
 	{
-		log_info("master register: creating database objects inside the %s schema", repmgr_schema);
+		log_info("master register: creating database objects inside the %s schema\n", repmgr_schema);
 
 		/* ok, create the schema */
-		snprintf(sqlquery, QUERY_STR_LEN, "CREATE SCHEMA %s", repmgr_schema);
+		sqlquery_snprintf(sqlquery, "CREATE SCHEMA %s", repmgr_schema);
 		log_debug("master register: %s\n", sqlquery);
 		if (!PQexec(conn, sqlquery))
 		{
@@ -384,10 +406,10 @@ do_master_register(void)
 		}
 
 		/* ... the tables */
-		snprintf(sqlquery, QUERY_STR_LEN, "CREATE TABLE %s.repl_nodes (        "
-		         "  id        integer primary key, "
-		         "  cluster   text    not null,    "
-		         "  conninfo  text    not null)", repmgr_schema);
+		sqlquery_snprintf(sqlquery, "CREATE TABLE %s.repl_nodes (        "
+		                  "  id        integer primary key, "
+		                  "  cluster   text    not null,    "
+		                  "  conninfo  text    not null)", repmgr_schema);
 		log_debug("master register: %s\n", sqlquery);
 		if (!PQexec(conn, sqlquery))
 		{
@@ -397,14 +419,14 @@ do_master_register(void)
 			exit(ERR_BAD_CONFIG);
 		}
 
-		snprintf(sqlquery, QUERY_STR_LEN, "CREATE TABLE %s.repl_monitor ( "
-		         "  primary_node                   INTEGER NOT NULL, "
-		         "  standby_node                   INTEGER NOT NULL, "
-		         "  last_monitor_time              TIMESTAMP WITH TIME ZONE NOT NULL, "
-		         "  last_wal_primary_location      TEXT NOT NULL,   "
-		         "  last_wal_standby_location      TEXT NOT NULL,   "
-		         "  replication_lag                BIGINT NOT NULL, "
-		         "  apply_lag                      BIGINT NOT NULL) ", repmgr_schema);
+		sqlquery_snprintf(sqlquery, "CREATE TABLE %s.repl_monitor ( "
+		                  "  primary_node                   INTEGER NOT NULL, "
+		                  "  standby_node                   INTEGER NOT NULL, "
+		                  "  last_monitor_time              TIMESTAMP WITH TIME ZONE NOT NULL, "
+		                  "  last_wal_primary_location      TEXT NOT NULL,   "
+		                  "  last_wal_standby_location      TEXT NOT NULL,   "
+		                  "  replication_lag                BIGINT NOT NULL, "
+		                  "  apply_lag                      BIGINT NOT NULL) ", repmgr_schema);
 		log_debug("master register: %s\n", sqlquery);
 		if (!PQexec(conn, sqlquery))
 		{
@@ -415,15 +437,15 @@ do_master_register(void)
 		}
 
 		/* and the view */
-		snprintf(sqlquery, QUERY_STR_LEN, "CREATE VIEW %s.repl_status AS "
-		         "  WITH monitor_info AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY primary_node, standby_node "
-		         " ORDER BY last_monitor_time desc) "
-		         "  FROM %s.repl_monitor) "
-		         "  SELECT primary_node, standby_node, last_monitor_time, last_wal_primary_location, "
-		         "         last_wal_standby_location, pg_size_pretty(replication_lag) replication_lag, "
-		         "         pg_size_pretty(apply_lag) apply_lag, age(now(), last_monitor_time) AS time_lag "
-		         "    FROM monitor_info a "
-		         "   WHERE row_number = 1", repmgr_schema, repmgr_schema);
+		sqlquery_snprintf(sqlquery, "CREATE VIEW %s.repl_status AS "
+		                  "  WITH monitor_info AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY primary_node, standby_node "
+		                  " ORDER BY last_monitor_time desc) "
+		                  "  FROM %s.repl_monitor) "
+		                  "  SELECT primary_node, standby_node, last_monitor_time, last_wal_primary_location, "
+		                  "         last_wal_standby_location, pg_size_pretty(replication_lag) replication_lag, "
+		                  "         pg_size_pretty(apply_lag) apply_lag, age(now(), last_monitor_time) AS time_lag "
+		                  "    FROM monitor_info a "
+		                  "   WHERE row_number = 1", repmgr_schema, repmgr_schema);
 		log_debug("master register: %s\n", sqlquery);
 		if (!PQexec(conn, sqlquery))
 		{
@@ -436,10 +458,11 @@ do_master_register(void)
 	else
 	{
 		PGconn *master_conn;
-		int 	id;
+		int		id;
 
 		/* Ensure there isn't any other master already registered */
-		master_conn = getMasterConnection(conn, options.node, options.cluster_name, &id);
+		master_conn = getMasterConnection(conn, options.node,
+		                                  options.cluster_name, &id,NULL);
 		if (master_conn != NULL)
 		{
 			PQfinish(master_conn);
@@ -451,9 +474,9 @@ do_master_register(void)
 	/* Now register the master */
 	if (runtime_options.force)
 	{
-		snprintf(sqlquery, QUERY_STR_LEN, "DELETE FROM %s.repl_nodes "
-		         " WHERE id = %d",
-		         repmgr_schema, options.node);
+		sqlquery_snprintf(sqlquery, "DELETE FROM %s.repl_nodes "
+		                  " WHERE id = %d",
+		                  repmgr_schema, options.node);
 		log_debug("master register: %s\n", sqlquery);
 
 		if (!PQexec(conn, sqlquery))
@@ -465,9 +488,9 @@ do_master_register(void)
 		}
 	}
 
-	snprintf(sqlquery, QUERY_STR_LEN, "INSERT INTO %s.repl_nodes "
-	         "VALUES (%d, '%s', '%s')",
-	         repmgr_schema, options.node, options.cluster_name, options.conninfo);
+	sqlquery_snprintf(sqlquery, "INSERT INTO %s.repl_nodes "
+	                  "VALUES (%d, '%s', '%s')",
+	                  repmgr_schema, options.node, options.cluster_name, options.conninfo);
 	log_debug("master register: %s\n", sqlquery);
 
 	if (!PQexec(conn, sqlquery))
@@ -488,19 +511,24 @@ do_master_register(void)
 static void
 do_standby_register(void)
 {
-	PGconn 		*conn;
+	PGconn		*conn;
 	PGconn		*master_conn;
 	int			master_id;
 
 	PGresult	*res;
 	char 		sqlquery[QUERY_STR_LEN];
+	char		schema_quoted[MAXLEN];
 
 	char master_version[MAXVERSIONSTR];
 	char standby_version[MAXVERSIONSTR];
 
+	/* XXX: A lot of copied code from do_master_register! Refactor */
+
+	log_info(_("%s connecting to standby database\n"), progname);
 	conn = establishDBConnection(options.conninfo, true);
 
 	/* should be v9 or better */
+	log_info(_("%s connected to standby, checking its state\n"), progname);
 	pg_version(conn, standby_version);
 	if (strcmp(standby_version, "") == 0)
 	{
@@ -517,8 +545,20 @@ do_standby_register(void)
 		exit(ERR_BAD_CONFIG);
 	}
 
+	/* Assemble a quoted schema name
+	 * XXX This is not currently used due to a merge conflict, but
+	 * probably should be */
+	if (false)
+	{
+		char *identifier = PQescapeIdentifier(conn, repmgr_schema,
+		                                      strlen(repmgr_schema));
+
+		maxlen_snprintf(schema_quoted, "%s", identifier);
+		PQfreemem(identifier);
+	}
+
 	/* Check if there is a schema for this cluster */
-	snprintf(sqlquery, QUERY_STR_LEN, "SELECT 1 FROM pg_namespace WHERE nspname = '%s'", repmgr_schema);
+	sqlquery_snprintf(sqlquery, "SELECT 1 FROM pg_namespace WHERE nspname = '%s'", repmgr_schema);
 	log_debug("standby register: %s\n", sqlquery);
 	res = PQexec(conn, sqlquery);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -529,8 +569,9 @@ do_standby_register(void)
 		exit(ERR_BAD_CONFIG);
 	}
 
-	if (PQntuples(res) == 0)		/* schema doesn't exist */
+	if (PQntuples(res) == 0)
 	{
+		/* schema doesn't exist */
 		log_err("Schema %s doesn't exists.\n", repmgr_schema);
 		PQclear(res);
 		PQfinish(conn);
@@ -539,7 +580,9 @@ do_standby_register(void)
 	PQclear(res);
 
 	/* check if there is a master in this cluster */
-	master_conn = getMasterConnection(conn, options.node, options.cluster_name, &master_id);
+	log_info(_("%s connecting to master database\n"), progname);
+	master_conn = getMasterConnection(conn, options.node, options.cluster_name,
+	                                  &master_id, NULL);
 	if (!master_conn)
 	{
 		log_err(_("A master must be defined before configuring a slave\n"));
@@ -547,6 +590,7 @@ do_standby_register(void)
 	}
 
 	/* master should be v9 or better */
+	log_info(_("%s connected to master, checking its state\n"), progname);
 	pg_version(master_conn, master_version);
 	if (strcmp(master_version, "") == 0)
 	{
@@ -566,13 +610,13 @@ do_standby_register(void)
 		exit(ERR_BAD_CONFIG);
 	}
 
-
 	/* Now register the standby */
+	log_info(_("%s registering the standby\n"), progname);
 	if (runtime_options.force)
 	{
-		snprintf(sqlquery, QUERY_STR_LEN, "DELETE FROM %s.repl_nodes "
-		         " WHERE id = %d",
-		         repmgr_schema, options.node);
+		sqlquery_snprintf(sqlquery, "DELETE FROM %s.repl_nodes "
+		                  " WHERE id = %d",
+		                  repmgr_schema, options.node);
 		log_debug("standby register: %s\n", sqlquery);
 
 		if (!PQexec(master_conn, sqlquery))
@@ -585,9 +629,9 @@ do_standby_register(void)
 		}
 	}
 
-	snprintf(sqlquery, QUERY_STR_LEN, "INSERT INTO %s.repl_nodes "
-	         "VALUES (%d, '%s', '%s')",
-	         repmgr_schema, options.node, options.cluster_name, options.conninfo);
+	sqlquery_snprintf(sqlquery, "INSERT INTO %s.repl_nodes "
+	                  "VALUES (%d, '%s', '%s')",
+	                  repmgr_schema, options.node, options.cluster_name, options.conninfo);
 	log_debug("standby register: %s\n", sqlquery);
 
 	if (!PQexec(master_conn, sqlquery))
@@ -599,6 +643,7 @@ do_standby_register(void)
 		exit(ERR_BAD_CONFIG);
 	}
 
+	log_info(_("%s registering the standby complete\n"), progname);
 	PQfinish(master_conn);
 	PQfinish(conn);
 	return;
@@ -608,9 +653,9 @@ do_standby_register(void)
 static void
 do_standby_clone(void)
 {
-	PGconn 		*conn;
+	PGconn		*conn;
 	PGresult	*res;
-	char 		sqlquery[QUERY_STR_LEN];
+	char		sqlquery[QUERY_STR_LEN];
 
 	int			r = 0;
 	int			i;
@@ -624,8 +669,8 @@ do_standby_clone(void)
 	char		local_control_file[MAXFILENAME];
 	char		tblspc_dir[MAXFILENAME];
 
-	const char	*first_wal_segment = NULL;
-	const char	*last_wal_segment = NULL;
+	char		*first_wal_segment = NULL;
+	const char	*last_wal_segment  = NULL;
 
 	char	master_version[MAXVERSIONSTR];
 
@@ -641,7 +686,6 @@ do_standby_clone(void)
 	case 0:
 		/* dest_dir not there, must create it */
 		log_info(_("creating directory %s ...\n"), runtime_options.dest_dir);
-		fflush(stdout);
 
 		if (!create_directory(runtime_options.dest_dir))
 		{
@@ -652,9 +696,8 @@ do_standby_clone(void)
 		break;
 	case 1:
 		/* Present but empty, fix permissions and use it */
-		log_info(_("fixing permissions on existing directory %s ...\n"),
+		log_info(_("checking and correcting permissions on existing directory %s ...\n"),
 		         runtime_options.dest_dir);
-		fflush(stdout);
 
 		if (!set_directory_permissions(runtime_options.dest_dir))
 		{
@@ -698,15 +741,11 @@ do_standby_clone(void)
 	values[1] = runtime_options.masterport;
 
 	/* We need to connect to check configuration and start a backup */
-	conn = PQconnectdbParams(keywords, values, true);
-	if (!conn)
-	{
-		log_err(_("%s: could not connect to master\n"),
-		        progname);
-		exit(ERR_BAD_CONFIG);
-	}
+	log_info(_("%s connecting to master database\n"), progname);
+	conn=establishDBConnectionByParams(keywords,values,true);
 
 	/* primary should be v9 or better */
+	log_info(_("%s connected to master, checking its state\n"), progname);
 	pg_version(conn, master_version);
 	if (strcmp(master_version, "") == 0)
 	{
@@ -745,8 +784,14 @@ do_standby_clone(void)
 
 	log_info(_("Succesfully connected to primary. Current installation size is %s\n"), get_cluster_size(conn));
 
-	/* Check if the tablespace locations exists and that we can write to them */
-	snprintf(sqlquery, QUERY_STR_LEN, "select spclocation from pg_tablespace where spcname not in ('pg_default', 'pg_global')");
+	/*
+	 * Check if the tablespace locations exists and that we can write to
+	 * them.
+	 */
+	sqlquery_snprintf(sqlquery,
+	                  "SELECT spclocation "
+	                  "  FROM pg_tablespace "
+	                  "WHERE spcname NOT IN ('pg_default', 'pg_global')");
 	log_debug("standby clone: %s\n", sqlquery);
 
 	res = PQexec(conn, sqlquery);
@@ -765,9 +810,7 @@ do_standby_clone(void)
 		{
 		case 0:
 			/* tblspc_dir not there, must create it */
-			if (runtime_options.verbose)
-				printf(_("creating directory \"%s\"... "), tblspc_dir);
-			fflush(stdout);
+			log_info(_("creating directory \"%s\"... "), tblspc_dir);
 
 			if (!create_directory(tblspc_dir))
 			{
@@ -780,10 +823,8 @@ do_standby_clone(void)
 			break;
 		case 1:
 			/* Present but empty, fix permissions and use it */
-			if (runtime_options.verbose)
-				printf(_("fixing permissions on existing directory \"%s\"... "),
-				       tblspc_dir);
-			fflush(stdout);
+			log_info(_("fixing permissions on existing directory \"%s\"... "),
+			         tblspc_dir);
 
 			if (!set_directory_permissions(tblspc_dir))
 			{
@@ -798,8 +839,7 @@ do_standby_clone(void)
 			/* Present and not empty */
 			if (!runtime_options.force)
 			{
-				fprintf(stderr,
-				        _("%s: directory \"%s\" exists but is not empty\n"),
+				log_err(_("%s: directory \"%s\" exists but is not empty\n"),
 				        progname, tblspc_dir);
 				PQclear(res);
 				PQfinish(conn);
@@ -818,9 +858,10 @@ do_standby_clone(void)
 	log_notice("Starting backup...\n");
 
 	/* Get the data directory full path and the configuration files location */
-	snprintf(sqlquery, QUERY_STR_LEN, "SELECT name, setting "
-	         "  FROM pg_settings "
-	         " WHERE name IN ('data_directory', 'config_file', 'hba_file', 'ident_file')");
+	sqlquery_snprintf(sqlquery,
+	                  "SELECT name, setting "
+	                  "  FROM pg_settings "
+	                  " WHERE name IN ('data_directory', 'config_file', 'hba_file', 'ident_file')");
 	log_debug("standby clone: %s\n", sqlquery);
 	res = PQexec(conn, sqlquery);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -849,9 +890,11 @@ do_standby_clone(void)
 	 * inform the master we will start a backup and get the first XLog filename
 	 * so we can say to the user we need those files
 	 */
-	snprintf(sqlquery, QUERY_STR_LEN, "SELECT pg_xlogfile_name(pg_start_backup('repmgr_standby_clone_%ld'))", time(NULL));
+	sqlquery_snprintf(
+	    sqlquery,
+	    "SELECT pg_xlogfile_name(pg_start_backup('repmgr_standby_clone_%ld'))",
+	    time(NULL));
 	log_debug("standby clone: %s\n", sqlquery);
-
 	res = PQexec(conn, sqlquery);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
@@ -860,25 +903,36 @@ do_standby_clone(void)
 		PQfinish(conn);
 		exit(ERR_BAD_CONFIG);
 	}
-	first_wal_segment = PQgetvalue(res, 0, 0);
+
+	if (runtime_options.verbose)
+	{
+		char	*first_wal_seg_pq = PQgetvalue(res, 0, 0);
+		size_t	 buf_sz			  = strlen(first_wal_seg_pq);
+
+		first_wal_segment = malloc(buf_sz + 1);
+		xsnprintf(first_wal_segment, buf_sz + 1, "%s", first_wal_seg_pq);
+	}
+
 	PQclear(res);
 
 	/*
 	 * 1) first move global/pg_control
 	 *
-	 * 2) then move data_directory ommiting the files we have already moved and pg_xlog
-	 *    content
+	 * 2) then move data_directory ommiting the files we have already moved and
+	 *    pg_xlog content
 	 *
-	 * 3) finally We need to backup configuration files (that could be on other directories, debian
-	 * like systems likes to do that), so look at config_file, hba_file and ident_file but we
-	 * can omit external_pid_file ;)
+	 * 3) finally We need to backup configuration files (that could be on other
+	 *    directories, debian like systems likes to do that), so look at
+	 *    config_file, hba_file and ident_file but we can omit
+	 *    external_pid_file ;)
 	 *
 	 * On error we need to return but before that execute pg_stop_backup()
 	 */
 
 	/* need to create the global sub directory */
-	snprintf(master_control_file, MAXFILENAME, "%s/global/pg_control", master_data_directory);
-	snprintf(local_control_file, MAXFILENAME, "%s/global", runtime_options.dest_dir);
+	maxlen_snprintf(master_control_file, "%s/global/pg_control",
+	                master_data_directory);
+	maxlen_snprintf(local_control_file, "%s/global", runtime_options.dest_dir);
 	if (!create_directory(local_control_file))
 	{
 		log_err(_("%s: couldn't create directory %s ...\n"),
@@ -887,7 +941,8 @@ do_standby_clone(void)
 	}
 
 	log_info("standby clone: master control file '%s'\n", master_control_file);
-	r = copy_remote_files(runtime_options.host, runtime_options.remote_user, master_control_file, local_control_file, false);
+	r = copy_remote_files(runtime_options.host, runtime_options.remote_user,
+	                      master_control_file, local_control_file, false);
 	if (r != 0)
 	{
 		log_warning("standby clone: failed copying master control file '%s'\n", master_control_file);
@@ -895,7 +950,8 @@ do_standby_clone(void)
 	}
 
 	log_info("standby clone: master data directory '%s'\n", master_data_directory);
-	r = copy_remote_files(runtime_options.host, runtime_options.remote_user, master_data_directory, runtime_options.dest_dir, true);
+	r = copy_remote_files(runtime_options.host, runtime_options.remote_user,
+	                      master_data_directory, runtime_options.dest_dir, true);
 	if (r != 0)
 	{
 		log_warning("standby clone: failed copying master data directory '%s'\n", master_data_directory);
@@ -903,10 +959,14 @@ do_standby_clone(void)
 	}
 
 	/*
-	 * Copy tablespace locations, i'm doing this separately because i couldn't find and appropiate
-	 * rsync option but besides we could someday make all these rsync happen concurrently
+	 * Copy tablespace locations, i'm doing this separately because i couldn't
+	 * find and appropiate rsync option but besides we could someday make all
+	 * these rsync happen concurrently
 	 */
-	snprintf(sqlquery, QUERY_STR_LEN, "select spclocation from pg_tablespace where spcname not in ('pg_default', 'pg_global')");
+	sqlquery_snprintf(sqlquery,
+	                  "SELECT spclocation "
+	                  "  FROM pg_tablespace "
+	                  "  WHERE spcname NOT IN ('pg_default', 'pg_global')");
 	log_debug("standby clone: %s\n", sqlquery);
 	res = PQexec(conn, sqlquery);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -919,7 +979,8 @@ do_standby_clone(void)
 	{
 		strncpy(tblspc_dir, PQgetvalue(res, i, 0), MAXFILENAME);
 		log_info("standby clone: master tablespace '%s'\n", tblspc_dir);
-		r = copy_remote_files(runtime_options.host, runtime_options.remote_user, tblspc_dir, tblspc_dir, true);
+		r = copy_remote_files(runtime_options.host, runtime_options.remote_user,
+		                      tblspc_dir, tblspc_dir, true);
 		if (r != 0)
 		{
 			log_warning("standby clone: failed copying tablespace directory '%s'\n", tblspc_dir);
@@ -928,7 +989,8 @@ do_standby_clone(void)
 	}
 
 	log_info("standby clone: master config file '%s'\n", master_config_file);
-	r = copy_remote_files(runtime_options.host, runtime_options.remote_user, master_config_file, runtime_options.dest_dir, false);
+	r = copy_remote_files(runtime_options.host, runtime_options.remote_user,
+	                      master_config_file, runtime_options.dest_dir, false);
 	if (r != 0)
 	{
 		log_warning("standby clone: failed copying master config file '%s'\n", master_config_file);
@@ -944,7 +1006,8 @@ do_standby_clone(void)
 	}
 
 	log_info("standby clone: master ident file '%s'\n", master_ident_file);
-	r = copy_remote_files(runtime_options.host, runtime_options.remote_user, master_ident_file, runtime_options.dest_dir, false);
+	r = copy_remote_files(runtime_options.host, runtime_options.remote_user,
+	                      master_ident_file, runtime_options.dest_dir, false);
 	if (r != 0)
 	{
 		log_warning("standby clone: failed copying master ident file '%s'\n", master_ident_file);
@@ -952,18 +1015,18 @@ do_standby_clone(void)
 	}
 
 stop_backup:
-	/* inform the master that we have finished the backup */
-	conn = PQconnectdbParams(keywords, values, true);
-	if (!conn)
-	{
-		log_err(_("%s: could not connect to master\n"),
-		        progname);
-		exit(ERR_BAD_RSYNC);
-	}
+
+	/*
+	 * Inform the master that we have finished the backup.
+	 *
+	 * Don't have this one exit if it fails, so that a more informative
+	 * error message will also appear about the backup not being stopped.
+	 */
+	log_info(_("%s connecting to master database to stop backup\n"), progname);
+	conn=establishDBConnectionByParams(keywords,values,false);
 
 	log_notice("Finishing backup...\n");
-
-	snprintf(sqlquery, QUERY_STR_LEN, "SELECT pg_xlogfile_name(pg_stop_backup())");
+	sqlquery_snprintf(sqlquery, "SELECT pg_xlogfile_name(pg_stop_backup())");
 	log_debug("standby clone: %s\n", sqlquery);
 
 	res = PQexec(conn, sqlquery);
@@ -976,16 +1039,29 @@ stop_backup:
 	}
 	last_wal_segment = PQgetvalue(res, 0, 0);
 
+	log_info(_("%s requires primary to keep WAL files %s until at least %s\n"),
+	         progname, first_wal_segment, last_wal_segment);
+
+	/* Finished with the database connection now */
+	PQclear(res);
+	PQfinish(conn);
+
+	/*
+	 * Only free the first_wal_segment since it was copied out of the
+	 * pqresult.
+	 */
+	free(first_wal_segment);
+	first_wal_segment = NULL;
+
 	/* If the rsync failed then exit */
 	if (r != 0)
 		exit(ERR_BAD_RSYNC);
 
-	if (runtime_options.verbose)
-		printf(_("%s requires primary to keep WAL files %s until at least %s\n"),
-		       progname, first_wal_segment, last_wal_segment);
-
-	/* we need to create the pg_xlog sub directory too, i'm reusing a variable here */
-	snprintf(local_control_file, MAXFILENAME, "%s/pg_xlog", runtime_options.dest_dir);
+	/*
+	 * We need to create the pg_xlog sub directory too, I'm reusing a variable
+	 * here.
+	 */
+	maxlen_snprintf(local_control_file, "%s/pg_xlog", runtime_options.dest_dir);
 	if (!create_directory(local_control_file))
 	{
 		log_err(_("%s: couldn't create directory %s, you will need to do it manually...\n"),
@@ -994,16 +1070,13 @@ stop_backup:
 	}
 
 	/* Finally, write the recovery.conf file */
-	create_recovery_file(runtime_options.dest_dir);
-
-	PQclear(res);
-	PQfinish(conn);
+	create_recovery_file(runtime_options.dest_dir, NULL);
 
 	/*
 	 * We don't start the service yet because we still may want to
 	 * move the directory
 	 */
-
+	log_info(_("%s standby clone complete\n"), progname);
 	exit(r);
 }
 
@@ -1011,10 +1084,10 @@ stop_backup:
 static void
 do_standby_promote(void)
 {
-	PGconn 		*conn;
+	PGconn		*conn;
 	PGresult	*res;
 	char 		sqlquery[QUERY_STR_LEN];
-	char 		script[QUERY_STR_LEN];
+	char		script[MAXLEN];
 
 	PGconn		*old_master_conn;
 	int			old_master_id;
@@ -1027,9 +1100,11 @@ do_standby_promote(void)
 	char	standby_version[MAXVERSIONSTR];
 
 	/* We need to connect to check configuration */
+	log_info(_("%s connecting to master database\n"), progname);
 	conn = establishDBConnection(options.conninfo, true);
 
 	/* we need v9 or better */
+	log_info(_("%s connected to master, checking its state\n"), progname);
 	pg_version(conn, standby_version);
 	if (strcmp(standby_version, "") == 0)
 	{
@@ -1046,7 +1121,8 @@ do_standby_promote(void)
 	}
 
 	/* we also need to check if there isn't any master already */
-	old_master_conn = getMasterConnection(conn, options.node, options.cluster_name, &old_master_id);
+	old_master_conn = getMasterConnection(conn, options.node, options.cluster_name,
+	                                      &old_master_id, NULL);
 	if (old_master_conn != NULL)
 	{
 		PQfinish(old_master_conn);
@@ -1054,12 +1130,11 @@ do_standby_promote(void)
 		exit(ERR_BAD_CONFIG);
 	}
 
-	if (runtime_options.verbose)
-		printf(_("\n%s: Promoting standby...\n"), progname);
+	log_notice(_("%s: Promoting standby\n"), progname);
 
 	/* Get the data directory full path and the last subdirectory */
-	snprintf(sqlquery, QUERY_STR_LEN, "SELECT setting "
-	         " FROM pg_settings WHERE name = 'data_directory'");
+	sqlquery_snprintf(sqlquery, "SELECT setting "
+	                  " FROM pg_settings WHERE name = 'data_directory'");
 	log_debug("standby promote: %s\n", sqlquery);
 	res = PQexec(conn, sqlquery);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -1073,8 +1148,9 @@ do_standby_promote(void)
 	PQclear(res);
 	PQfinish(conn);
 
-	snprintf(recovery_file_path, MAXFILENAME, "%s/%s", data_dir, RECOVERY_FILE);
-	snprintf(recovery_done_path, MAXFILENAME, "%s/%s", data_dir, RECOVERY_DONE_FILE);
+	log_info(_("%s: Marking recovery done\n"), progname);
+	maxlen_snprintf(recovery_file_path, "%s/%s", data_dir, RECOVERY_FILE);
+	maxlen_snprintf(recovery_done_path, "%s/%s", data_dir, RECOVERY_DONE_FILE);
 	rename(recovery_file_path, recovery_done_path);
 
 	/*
@@ -1083,7 +1159,8 @@ do_standby_promote(void)
 	 * find an active server rather than one starting up.  This may
 	 * hang for up the default timeout (60 seconds).
 	 */
-	snprintf(script, QUERY_STR_LEN, "pg_ctl -D %s -w -m fast restart", data_dir);
+	log_notice(_("%s: restarting server using pg_ctl\n"), progname);
+	maxlen_snprintf(script, "pg_ctl -D %s -w -m fast restart", data_dir);
 	r = system(script);
 	if (r != 0)
 	{
@@ -1092,6 +1169,7 @@ do_standby_promote(void)
 	}
 
 	/* reconnect to check we got promoted */
+	log_info(_("%s connecting to now restarted database\n"), progname);
 	conn = establishDBConnection(options.conninfo, true);
 	if (is_standby(conn))
 	{
@@ -1102,7 +1180,6 @@ do_standby_promote(void)
 		log_err("\n%s: STANDBY PROMOTE successful.  You should REINDEX any hash indexes you have.\n", progname);
 	}
 	PQfinish(conn);
-
 	return;
 }
 
@@ -1110,11 +1187,11 @@ do_standby_promote(void)
 static void
 do_standby_follow(void)
 {
-	PGconn 		*conn;
+	PGconn		*conn;
 	PGresult	*res;
 	char 		sqlquery[QUERY_STR_LEN];
-	char 		script[QUERY_STR_LEN];
-
+	char		script[MAXLEN];
+	char		master_conninfo[MAXLEN];
 	PGconn		*master_conn;
 	int			master_id;
 
@@ -1125,9 +1202,11 @@ do_standby_follow(void)
 	char	standby_version[MAXVERSIONSTR];
 
 	/* We need to connect to check configuration */
+	log_info(_("%s connecting to standby database\n"), progname);
 	conn = establishDBConnection(options.conninfo, true);
 
 	/* Check we are in a standby node */
+	log_info(_("%s connected to standby, checking its state\n"), progname);
 	if (!is_standby(conn))
 	{
 		log_err("\n%s: The command should be executed in a standby node\n", progname);
@@ -1145,7 +1224,9 @@ do_standby_follow(void)
 	}
 
 	/* we also need to check if there is any master in the cluster */
-	master_conn = getMasterConnection(conn, options.node, options.cluster_name, &master_id);
+	log_info(_("%s connecting to master database\n"), progname);
+	master_conn = getMasterConnection(conn, options.node,
+	                                  options.cluster_name, &master_id,(char *) &master_conninfo);
 	if (master_conn == NULL)
 	{
 		PQfinish(conn);
@@ -1162,6 +1243,7 @@ do_standby_follow(void)
 	}
 
 	/* should be v9 or better */
+	log_info(_("%s connected to master, checking its state\n"), progname);
 	pg_version(master_conn, master_version);
 	if (strcmp(master_version, "") == 0)
 	{
@@ -1190,12 +1272,11 @@ do_standby_follow(void)
 	strncpy(runtime_options.masterport, PQport(master_conn), MAXLEN);
 	PQfinish(master_conn);
 
-	if (runtime_options.verbose)
-		printf(_("\n%s: Changing standby's master...\n"), progname);
+	log_info(_("%s Changing standby's master"),progname);
 
 	/* Get the data directory full path */
-	snprintf(sqlquery, QUERY_STR_LEN, "SELECT setting "
-	         " FROM pg_settings WHERE name = 'data_directory'");
+	sqlquery_snprintf(sqlquery, "SELECT setting "
+	                  " FROM pg_settings WHERE name = 'data_directory'");
 	log_debug("standby follow: %s\n", sqlquery);
 	res = PQexec(conn, sqlquery);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -1210,12 +1291,12 @@ do_standby_follow(void)
 	PQfinish(conn);
 
 	/* write the recovery.conf file */
-	if (!create_recovery_file(data_dir))
+	if (!create_recovery_file(data_dir,NULL))
 		exit(ERR_BAD_CONFIG);
 
 	/* Finally, restart the service */
 	/* We assume the pg_ctl script is in the PATH */
-	snprintf(script, QUERY_STR_LEN, "pg_ctl -D %s -m fast restart", data_dir);
+	maxlen_snprintf(script, "pg_ctl -D %s -m fast restart", data_dir);
 	r = system(script);
 	if (r != 0)
 	{
@@ -1238,44 +1319,50 @@ void help(const char *progname)
 {
 	printf(_("\n%s: Replicator manager \n"), progname);
 	printf(_("Usage:\n"));
-	printf(_(" %s [OPTIONS] master  {register}\n"), progname);
-	printf(_(" %s [OPTIONS] standby {register|clone|promote|follow}\n"), progname);
+	printf(_(" %s [OPTIONS] master	{register}\n"), progname);
+	printf(_(" %s [OPTIONS] standby {register|clone|promote|follow}\n"),
+	       progname);
 	printf(_("\nGeneral options:\n"));
-	printf(_("  --help                     show this help, then exit\n"));
-	printf(_("  --version                  output version information, then exit\n"));
-	printf(_("  --verbose                  output verbose activity information\n"));
+	printf(_("	--help					   show this help, then exit\n"));
+	printf(_("	--version				   output version information, then exit\n"));
+	printf(_("	--verbose				   output verbose activity information\n"));
 	printf(_("\nConnection options:\n"));
-	printf(_("  -d, --dbname=DBNAME        database to connect to\n"));
-	printf(_("  -h, --host=HOSTNAME        database server host or socket directory\n"));
-	printf(_("  -p, --port=PORT            database server port\n"));
-	printf(_("  -U, --username=USERNAME    database user name to connect as\n"));
+	printf(_("	-d, --dbname=DBNAME		   database to connect to\n"));
+	printf(_("	-h, --host=HOSTNAME		   database server host or socket directory\n"));
+	printf(_("	-p, --port=PORT			   database server port\n"));
+	printf(_("	-U, --username=USERNAME	   database user name to connect as\n"));
 	printf(_("\nConfiguration options:\n"));
-	printf(_("  -D, --data-dir=DIR         local directory where the files will be copied to\n"));
-	printf(_("  -f, --config_file=PATH     path to the configuration file\n"));
-	printf(_("  -R, --remote-user=USERNAME database server username for rsync\n"));
-	printf(_("  -w, --wal-keep-segments=VALUE  minimum value for the GUC wal_keep_segments (default: 5000)\n"));
-	printf(_("  -F, --force                force potentially dangerous operations to happen\n"));
+	printf(_("	-D, --data-dir=DIR		   local directory where the files will be copied to\n"));
+	printf(_("	-f, --config_file=PATH	   path to the configuration file\n"));
+	printf(_("	-R, --remote-user=USERNAME database server username for rsync\n"));
+	printf(_("	-w, --wal-keep-segments=VALUE  minimum value for the GUC wal_keep_segments (default: 5000)\n"));
+	printf(_("	-F, --force				   force potentially dangerous operations to happen\n"));
 
 	printf(_("\n%s performs some tasks like clone a node, promote it "), progname);
 	printf(_("or making follow another node and then exits.\n"));
 	printf(_("COMMANDS:\n"));
-	printf(_(" master register       - registers the master in a cluster\n"));
-	printf(_(" standby register      - registers a standby in a cluster\n"));
-	printf(_(" standby clone [node]  - allows creation of a new standby\n"));
-	printf(_(" standby promote       - allows manual promotion of a specific standby into a "));
+	printf(_(" master register		 - registers the master in a cluster\n"));
+	printf(_(" standby register		 - registers a standby in a cluster\n"));
+	printf(_(" standby clone [node]	 - allows creation of a new standby\n"));
+	printf(_(" standby promote		 - allows manual promotion of a specific standby into a "));
 	printf(_("new master in the event of a failover\n"));
-	printf(_(" standby follow        - allows the standby to re-point itself to a new master\n"));
+	printf(_(" standby follow		 - allows the standby to re-point itself to a new master\n"));
 }
 
 
+/*
+ * Creates a recovery file for a standby.
+ *
+ * Writes master_conninfo to recovery.conf if is non-NULL
+ */
 static bool
-create_recovery_file(const char *data_dir)
+create_recovery_file(const char *data_dir, char *master_conninfo)
 {
 	FILE		*recovery_file;
-	char		recovery_file_path[MAXFILENAME];
+	char		recovery_file_path[MAXLEN];
 	char		line[MAXLEN];
 
-	snprintf(recovery_file_path, MAXFILENAME, "%s/%s", data_dir, RECOVERY_FILE);
+	maxlen_snprintf(recovery_file_path, "%s/%s", data_dir, RECOVERY_FILE);
 
 	recovery_file = fopen(recovery_file_path, "w");
 	if (recovery_file == NULL)
@@ -1284,7 +1371,7 @@ create_recovery_file(const char *data_dir)
 		return false;
 	}
 
-	snprintf(line, MAXLEN, "standby_mode = 'on'\n");
+	maxlen_snprintf(line, "standby_mode = 'on'\n");
 	if (fputs(line, recovery_file) == EOF)
 	{
 		log_err("recovery file could not be written, it could be necessary to create it manually\n");
@@ -1292,7 +1379,40 @@ create_recovery_file(const char *data_dir)
 		return false;
 	}
 
-	snprintf(line, MAXLEN, "primary_conninfo = 'host=%s port=%s'\n", runtime_options.host, runtime_options.masterport);
+	maxlen_snprintf(line, "primary_conninfo = 'host=%s port=%s'\n", runtime_options.host, runtime_options.masterport);
+
+	/*
+	 * Template a password into the connection string in recovery.conf
+	 * if a full connection string is not already provided.
+	 *
+	 * Sometimes this is passed by the user explicitly, and otherwise
+	 * we try to get it into the environment.
+	 *
+	 * XXX: This is pretty dirty, at least push this up to the caller rather
+	 * than hitting environment variables at this level.
+	 */
+	if (master_conninfo == NULL)
+	{
+		char *password = getenv("PGPASSWORD");
+
+		if (password != NULL)
+		{
+			maxlen_snprintf(line,
+			                "primary_conninfo = 'host=%s port=%s password=%s'\n",
+			                runtime_options.host, runtime_options.masterport,
+			                password);
+		}
+		else
+		{
+			if (require_password)
+			{
+				log_err(_("%s: PGPASSWORD not set, but having one is required\n"),
+				        progname);
+				exit(ERR_BAD_PASSWORD);
+			}
+		}
+	}
+
 	if (fputs(line, recovery_file) == EOF)
 	{
 		log_err("recovery file could not be written, it could be necessary to create it manually\n");
@@ -1308,40 +1428,43 @@ create_recovery_file(const char *data_dir)
 
 
 static int
-copy_remote_files(char *host, char *remote_user, char *remote_path, char *local_path, bool is_directory)
+copy_remote_files(char *host, char *remote_user, char *remote_path,
+                  char *local_path, bool is_directory)
 {
-	char script[QUERY_STR_LEN];
-	char rsync_flags[QUERY_STR_LEN];
-	char host_string[QUERY_STR_LEN];
-	int  r;
+	char script[MAXLEN];
+	char rsync_flags[MAXLEN];
+	char host_string[MAXLEN];
+	int	 r;
 
-	if (strnlen(options.rsync_options, QUERY_STR_LEN) == 0)
-		snprintf(rsync_flags, QUERY_STR_LEN, "--archive --checksum --compress --progress --rsh=ssh");
+	if (strnlen(options.rsync_options, MAXLEN) == 0)
+		maxlen_snprintf(
+		    rsync_flags, "%s",
+		    "--archive --checksum --compress --progress --rsh=ssh");
 	else
-		strncpy(rsync_flags, options.rsync_options, QUERY_STR_LEN);
+		maxlen_snprintf(rsync_flags, "%s", options.rsync_options);
 
 	if (runtime_options.force)
 		strcat(rsync_flags, " --delete");
 
 	if (remote_user == NULL)
 	{
-		snprintf(host_string, QUERY_STR_LEN, "%s",host);
+		maxlen_snprintf(host_string, "%s", host);
 	}
 	else
 	{
-		snprintf(host_string, QUERY_STR_LEN, "%s@%s",remote_user,host);
+		maxlen_snprintf(host_string,"%s@%s",remote_user,host);
 	}
 
 	if (is_directory)
 	{
 		strcat(rsync_flags, " --exclude=pg_xlog* --exclude=pg_control --exclude=*.pid");
-		snprintf(script, QUERY_STR_LEN, "rsync %s %s:%s/* %s",
-		         rsync_flags, host_string, remote_path, local_path);
+		maxlen_snprintf(script, "rsync %s %s:%s/* %s",
+		                rsync_flags, host_string, remote_path, local_path);
 	}
 	else
 	{
-		snprintf(script, QUERY_STR_LEN, "rsync %s %s:%s %s/.",
-		         rsync_flags, host_string, remote_path, local_path);
+		maxlen_snprintf(script, "rsync %s %s:%s %s/.",
+		                rsync_flags, host_string, remote_path, local_path);
 	}
 
 	log_info("rsync command line:  '%s'\n", script);
@@ -1450,13 +1573,27 @@ check_parameters_for_action(const int action)
 		break;
 	case STANDBY_CLONE:
 		/*
-		 * To clone a master into a standby we need connection parameters
-		 * repmgr.conf is useless because we don't have a server running
-		 * in the standby
+		 * Issue a friendly notice that the configuration file is not
+		 * necessary nor read at all in when performing a STANDBY CLONE
+		 * action.
 		 */
 		if (runtime_options.config_file[0])
 		{
-			log_notice("Only command line parameters for the connection to the master are used when issuing a STANDBY CLONE command.\n");
+			log_notice("Only command line parameters for the connection "
+			           "to the master are used when issuing a STANDBY CLONE command. "
+			           "The passed configuration file is neither required nor used for "
+			           "its node configuration portions\n\n");
+		}
+		/*
+		 * To clone a master into a standby we need connection parameters
+		 * repmgr.conf is useless because we don't have a server running in
+		 * the standby; warn the user, but keep going.
+		 */
+		if (runtime_options.host == NULL)
+		{
+			log_notice("You need to use connection parameters to "
+			           "the master when issuing a STANDBY CLONE command.");
+			ok = false;
 		}
 		need_a_node = false;
 		break;

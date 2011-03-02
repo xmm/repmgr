@@ -18,6 +18,8 @@
  */
 
 #include "config.h"
+#include "repmgr.h"
+#include "strutil.h"
 
 void
 parse_config(const char* config_file, t_configuration_options* options)
@@ -28,17 +30,21 @@ parse_config(const char* config_file, t_configuration_options* options)
 
 	FILE *fp = fopen (config_file, "r");
 
-	if (fp == NULL)
-	{
-		fprintf(stderr, _("Could not find configuration file '%s'\n"), config_file);
-		exit(ERR_BAD_CONFIG);
-	}
-
 	/* Initialize */
 	memset(options->cluster_name, 0, sizeof(options->cluster_name));
 	options->node = -1;
 	memset(options->conninfo, 0, sizeof(options->conninfo));
 	memset(options->rsync_options, 0, sizeof(options->rsync_options));
+
+	/*
+	 * Since some commands don't require a config file at all, not
+	 * having one isn't necessarily a problem.
+	 */
+	if (fp == NULL)
+	{
+		fprintf(stderr, _("Did not find the configuration file '%s', continuing\n"), config_file);
+		return;
+	}
 
 	/* Read next line */
 	while ((s = fgets (buff, sizeof buff, fp)) != NULL)

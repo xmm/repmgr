@@ -1,6 +1,7 @@
 /*
- * config.h
- * Copyright (c) 2ndQuadrant, 2010-2011
+ * strutil.h
+ * Copyright (C) 2ndQuadrant, 2010-2011
+ *
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,24 +18,21 @@
  *
  */
 
-#ifndef _REPMGR_CONFIG_H_
-#define _REPMGR_CONFIG_H_
+#ifndef _STRUTIL_H_
+#define _STRUTIL_H_
 
-#include "repmgr.h"
-#include "strutil.h"
+#include <stdlib.h>
+#include <errcode.h>
 
-typedef struct
-{
-	char cluster_name[MAXLEN];
-	int node;
-	char conninfo[MAXLEN];
-	char loglevel[MAXLEN];
-	char logfacility[MAXLEN];
-	char rsync_options[QUERY_STR_LEN];
-} t_configuration_options;
+#define QUERY_STR_LEN	8192
+#define MAXLEN			1024
+#define MAXLINELENGTH	4096
+#define MAXVERSIONSTR	16
+#define MAXCONNINFO		1024
 
-void parse_config(const char* config_file, t_configuration_options* options);
-void parse_line(char *buff, char *name, char *value);
-char *trim(char *s);
 
-#endif
+extern int xsnprintf(char *str, size_t size, const char *format, ...);
+extern int sqlquery_snprintf(char *str, const char *format, ...);
+extern int maxlen_snprintf(char *str, const char *format, ...);
+
+#endif	/* _STRUTIL_H_ */

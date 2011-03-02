@@ -20,6 +20,8 @@
 #ifndef _REPMGR_LOG_H_
 #define _REPMGR_LOG_H_
 
+#include "repmgr.h"
+
 #define REPMGR_SYSLOG 1
 #define REPMGR_STDERR 2
 
@@ -111,6 +113,7 @@
 /* Logger initialisation and shutdown */
 bool logger_shutdown(void);
 bool logger_init(const char* ident, const char* level, const char* facility);
+void logger_min_verbose(int minimum);
 
 extern int log_type;
 extern int log_level;

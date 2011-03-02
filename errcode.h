@@ -1,6 +1,6 @@
 /*
- * config.h
- * Copyright (c) 2ndQuadrant, 2010-2011
+ * errcode.h
+ * Copyright (C) 2ndQuadrant, 2011
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,24 +17,21 @@
  *
  */
 
-#ifndef _REPMGR_CONFIG_H_
-#define _REPMGR_CONFIG_H_
+#ifndef _ERRCODE_H_
+#define _ERRCODE_H_
 
-#include "repmgr.h"
-#include "strutil.h"
+/* Exit return code */
 
-typedef struct
-{
-	char cluster_name[MAXLEN];
-	int node;
-	char conninfo[MAXLEN];
-	char loglevel[MAXLEN];
-	char logfacility[MAXLEN];
-	char rsync_options[QUERY_STR_LEN];
-} t_configuration_options;
+#define SUCCESS 0
+#define ERR_BAD_CONFIG 1
+#define ERR_BAD_RSYNC 2
+#define ERR_STOP_BACKUP 3
+#define ERR_NO_RESTART 4
+#define ERR_NEEDS_XLOG 5
+#define ERR_DB_CON 6
+#define ERR_DB_QUERY 7
+#define ERR_PROMOTED 8
+#define ERR_BAD_PASSWORD 9
+#define ERR_STR_OVERFLOW 10
 
-void parse_config(const char* config_file, t_configuration_options* options);
-void parse_line(char *buff, char *name, char *value);
-char *trim(char *s);
-
-#endif
+#endif	/* _ERRCODE_H_ */
