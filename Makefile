@@ -45,6 +45,7 @@ clean:
 	rm -f *.o
 	rm -f repmgrd
 	rm -f repmgr
+	rm -rf ./debian/usr
 
 deb: repmgrd repmgr
 	mkdir -p ./debian/usr/bin
