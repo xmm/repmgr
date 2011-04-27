@@ -49,7 +49,7 @@
 static void help(const char *progname);
 static bool create_recovery_file(const char *data_dir, char *master_conninfo);
 static int	copy_remote_files(char *host, char *remote_user, char *remote_path,
-                             char *local_path, bool is_directory);
+                              char *local_path, bool is_directory);
 static bool check_parameters_for_action(const int action);
 
 static void do_master_register(void);
@@ -71,7 +71,7 @@ bool need_a_node = true;
 bool require_password = false;
 
 /* Initialization of runtime options */
-t_runtime_options runtime_options = { "", "", "", "", "", "", DEFAULT_WAL_KEEP_SEGMENTS, false, false, "" };
+t_runtime_options runtime_options = { "", "", "", "", "", "", DEFAULT_WAL_KEEP_SEGMENTS, false, false, false, "" };
 t_configuration_options options = { "", -1, "", "", "" };
 
 static char		*server_mode = NULL;
@@ -91,6 +91,7 @@ main(int argc, char **argv)
 		{"remote-user", required_argument, NULL, 'R'},
 		{"wal-keep-segments", required_argument, NULL, 'w'},
 		{"force", no_argument, NULL, 'F'},
+		{"ignore-rsync-warning", no_argument, NULL, 'I'},
 		{"verbose", no_argument, NULL, 'v'},
 		{NULL, 0, NULL, 0}
 	};
@@ -149,6 +150,9 @@ main(int argc, char **argv)
 			break;
 		case 'F':
 			runtime_options.force = true;
+			break;
+		case 'I':
+			runtime_options.ignore_rsync_warn = true;
 			break;
 		case 'v':
 			runtime_options.verbose = true;
@@ -256,7 +260,7 @@ main(int argc, char **argv)
 	parse_config(runtime_options.config_file, &options);
 
 	keywords[2] = "user";
-	values[2] = runtime_options.username;
+	values[2] = (runtime_options.username[0]) ? runtime_options.username : NULL;
 	keywords[3] = "dbname";
 	values[3] = runtime_options.dbname;
 	keywords[4] = "application_name";
@@ -1336,6 +1340,7 @@ void help(const char *progname)
 	printf(_("	-f, --config_file=PATH	   path to the configuration file\n"));
 	printf(_("	-R, --remote-user=USERNAME database server username for rsync\n"));
 	printf(_("	-w, --wal-keep-segments=VALUE  minimum value for the GUC wal_keep_segments (default: 5000)\n"));
+	printf(_("	-I, --ignore-rsync-warning ignore rsync partial transfer warning\n"));
 	printf(_("	-F, --force				   force potentially dangerous operations to happen\n"));
 
 	printf(_("\n%s performs some tasks like clone a node, promote it "), progname);
@@ -1379,7 +1384,8 @@ create_recovery_file(const char *data_dir, char *master_conninfo)
 		return false;
 	}
 
-	maxlen_snprintf(line, "primary_conninfo = 'host=%s port=%s'\n", runtime_options.host, runtime_options.masterport);
+	maxlen_snprintf(line, "primary_conninfo = 'host=%s port=%s'\n", runtime_options.host,
+	                (runtime_options.masterport[0]) ? runtime_options.masterport : "5432");
 
 	/*
 	 * Template a password into the connection string in recovery.conf
@@ -1399,7 +1405,8 @@ create_recovery_file(const char *data_dir, char *master_conninfo)
 		{
 			maxlen_snprintf(line,
 			                "primary_conninfo = 'host=%s port=%s password=%s'\n",
-			                runtime_options.host, runtime_options.masterport,
+			                runtime_options.host,
+			                (runtime_options.masterport[0]) ? runtime_options.masterport : "5432",
 			                password);
 		}
 		else
@@ -1446,7 +1453,7 @@ copy_remote_files(char *host, char *remote_user, char *remote_path,
 	if (runtime_options.force)
 		strcat(rsync_flags, " --delete");
 
-	if (remote_user == NULL)
+	if (!remote_user[0])
 	{
 		maxlen_snprintf(host_string, "%s", host);
 	}
@@ -1471,6 +1478,30 @@ copy_remote_files(char *host, char *remote_user, char *remote_path,
 
 	r = system(script);
 
+	/*
+	 * If we are transfering a directory (data directory, tablespace directories)
+	 * then we can ignore some rsync warnings.  If we get some of those errors, we
+	 * treat them as 0 only if passed the --ignore-rsync-warning command-line option.
+	 *
+	 * List of ignorable rsync errors:
+	 *   24     Partial transfer due to vanished source files
+	 */
+	if ((WEXITSTATUS(r) == 24) && is_directory)
+	{
+		if (runtime_options.ignore_rsync_warn)
+		{
+			r = 0;
+			log_info(_("rsync partial transfer warning ignored\n"));
+		}
+		else
+			log_warning( _("\nrsync completed with return code 24: "
+			               "\"Partial transfer due to vanished source files\".\n"
+			               "This can happen because of normal operation "
+			               "on the master server, but it may indicate an "
+			               "unexpected change during cloning.  If you are certain "
+			               "no changes were made to the master, try cloning "
+			               "again using \"repmgr --force --ignore-rsync-warning\"."));
+	}
 	if (r != 0)
 		log_err(_("Can't rsync from remote file or directory (%s:%s)\n"),
 		        host_string, remote_path);
