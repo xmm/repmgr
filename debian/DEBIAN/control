@@ -1,4 +1,4 @@
-Package: repmgr
+Package: postgresql-repmgr
 Version: 1.0-1
 Section: database
 Priority: optional
