@@ -48,8 +48,10 @@ clean:
 	rm -rf ./debian/usr
 
 deb: repmgrd repmgr
-	mkdir -p ./debian/usr/bin
+	mkdir -p ./debian/usr/bin ./debian/usr/share/postgresql-repmgr
 	cp repmgrd repmgr ./debian/usr/bin/
+	cp README.rst COPYRIGHT CREDITS HISTORY LICENSE TODO ./debian/usr/share/postgresql-repmgr
+	cp *.sql ./debian/usr/share/postgresql-repmgr
 	dpkg-deb --build debian
 	mv debian.deb ../postgresql-repmgr-9.0_1.1.0.deb
 
