@@ -1,0 +1,654 @@
+#!/bin/bash
+#
+#
+# Description:	Manages a PostrgreSQL Server as an OCF High-Availability
+#		resource with Master/Slave mode under Heartbeat/LinuxHA control 
+#
+# Version 1.20110707.0
+# Copyright (c) 2011 Marat Khayrullin <xmm.dev@gmail.com>
+# As an example are used the Heartbeat pgsql OCF Resource Agent
+# As an example are used the Linbit drbd OCF Resource Agent
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of version 2 of the GNU General Public License as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it would be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+#
+# Further, this software is distributed without any warranty that it is
+# free of the rightful claim of any third person regarding infringement
+# or the like.  Any license provided herein, whether implied or
+# otherwise, applies only to this software file.  Patent licenses, if
+# any, provided herein do not apply to combinations of this program with
+# other software, or any other product whatsoever.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write the Free Software Foundation,
+# Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
+#
+
+#######################################################################
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/resource.d/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs
+
+: ${OCF_RESKEY_CRM_meta_clone_node_max=1}
+: ${OCF_RESKEY_CRM_meta_master_max=1}
+: ${OCF_RESKEY_CRM_meta_master_node_max=1}
+
+: ${OCF_RESKEY_repmgr=/usr/bin/repmgr}
+: ${OCF_RESKEY_repmgr_conf=/var/lib/pgsql/repmgr/repmgr.conf}
+: ${OCF_RESKEY_repmgr_clone_opt="-d postgres -U repmgr -R postgres"}
+: ${OCF_RESKEY_pgctl=/usr/bin/pg_ctl}
+: ${OCF_RESKEY_psql=/usr/bin/psql}
+: ${OCF_RESKEY_pgdata=/var/lib/pgsql/data}
+: ${OCF_RESKEY_pgconfig=${OCF_RESKEY_pgdata}/postgresql.conf}
+: ${OCF_RESKEY_pgdba=postgres}
+: ${OCF_RESKEY_pgport=5432}
+: ${OCF_RESKEY_start_opt="-p $OCF_RESKEY_pgport"}
+: ${OCF_RESKEY_pgdb=template1}
+: ${OCF_RESKEY_logfile=/dev/null}
+: ${OCF_RESKEY_stop_escalate=30}
+: ${OCF_RESKEY_master_score=100}
+: ${OCF_RESKEY_slave_score=50}
+
+CRM_MASTER="${HA_SBIN_DIR}/crm_master -l reboot"
+PIDFILE=${OCF_RESKEY_pgdata}/postmaster.pid
+SOCKETDIR=/var/run/postgresql
+
+#######################################################################
+meta_data() {
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="pgsql" version="1.0">
+<version>1.0</version>
+
+<longdesc lang="en">
+Master/Slave OCF Resource Agent for PostgreSQL with Hot, Warm or Streaming Backup
+</longdesc>
+<shortdesc lang="en">Manages a PostgreSQL Master/Slave instance</shortdesc>
+
+<parameters>
+<parameter name="repmgr" unique="0" required="0">
+<longdesc lang="en">
+Path to repmgr command.
+</longdesc>
+<shortdesc lang="en">repmgr</shortdesc>
+<content type="string" default="/usr/bin/repmgr" />
+</parameter>
+
+<parameter name="repmgr_conf" unique="0" required="0">
+<longdesc lang="en">
+Path to repmgr config file.
+</longdesc>
+<shortdesc lang="en">repmgr_conf</shortdesc>
+<content type="string" default="/var/lib/pgsql/data" />
+</parameter>
+
+<parameter name="repmgr_clone_opt" unique="0" required="0">
+<longdesc lang="en">
+standby clone params for repmgr command.
+</longdesc>
+<shortdesc lang="en">repmgr_clone_opt</shortdesc>
+<content type="string" default="-d postgres -U repmgr -R postgres" />
+</parameter>
+
+<parameter name="pgctl" unique="0" required="0">
+<longdesc lang="en">
+Path to pg_ctl command.
+</longdesc>
+<shortdesc lang="en">pgctl</shortdesc>
+<content type="string" default="/usr/bin/pg_ctl" />
+</parameter>
+
+<parameter name="start_opt" unique="0" required="0">
+<longdesc lang="en">
+Start options (-o start_opt in pgi_ctl). "-i -p 5432" for example.
+</longdesc>
+<shortdesc lang="en">start_opt</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="ctl_opt" unique="0" required="0">
+<longdesc lang="en">
+Additional pg_ctl options. Default is ""
+</longdesc>
+<shortdesc lang="en">ctl_opt</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="psql" unique="0" required="0">
+<longdesc lang="en">
+Path to psql command.
+</longdesc>
+<shortdesc lang="en">psql</shortdesc>
+<content type="string" default="/usr/bin/psql" />
+</parameter>
+
+<parameter name="pgdata" unique="0" required="0">
+<longdesc lang="en">
+Path to PostgreSQL data directory.
+</longdesc>
+<shortdesc lang="en">pgdata</shortdesc>
+<content type="string" default="/var/lib/pgsql/data" />
+</parameter>
+
+<parameter name="pgdba" unique="0" required="0">
+<longdesc lang="en">
+User that owns PostgreSQL.
+</longdesc>
+<shortdesc lang="en">pgdba</shortdesc>
+<content type="string" default="postgres" />
+</parameter>
+
+<parameter name="pghost" unique="0" required="0">
+<longdesc lang="en">
+Hostname/IP Addreess where PosrgeSQL is listening
+</longdesc>
+<shortdesc lang="en">pghost</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="pgport" unique="0" required="0">
+<longdesc lang="en">
+Port where PosrgeSQL is listening
+</longdesc>
+<shortdesc lang="en">pgport</shortdesc>
+<content type="string" default="5432" />
+</parameter>
+
+<parameter name="pgdb" unique="0" required="0">
+<longdesc lang="en">
+Database that will be used for monitoring.
+</longdesc>
+<shortdesc lang="en">pgdb</shortdesc>
+<content type="string" default="template1" />
+</parameter>
+
+<parameter name="logfile" unique="0" required="0">
+<longdesc lang="en">
+Path to PostgreSQL server log output file.
+</longdesc>
+<shortdesc lang="en">logfile</shortdesc>
+<content type="string" default="/dev/null" />
+</parameter>
+
+<parameter name="stop_escalate" unique="0" required="0">
+<longdesc lang="en">
+Number of retries (using -m fast) before resorting to -m immediate
+</longdesc>
+<shortdesc lang="en">stop escalation</shortdesc>
+<content type="string" default="30" />
+</parameter>
+
+<parameter name="master_score" unique="0" required="0">
+<longdesc lang="en">
+Score for adding to node with master instance
+</longdesc>
+<shortdesc lang="en">master_score</shortdesc>
+<content type="string" default="100" />
+</parameter>
+
+<parameter name="slave_score" unique="0" required="0">
+<longdesc lang="en">
+Score for adding to node with slave instance
+</longdesc>
+<shortdesc lang="en">slave_score</shortdesc>
+<content type="string" default="50" />
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start"   timeout="90" />
+<action name="promote"	 timeout="90" />
+<action name="demote"	timeout="90" />
+<action name="stop"    timeout="60" />
+<action name="notify"	timeout="20" />
+<action name="monitor" depth="0"  timeout="20" interval="20" role="Slave"/>
+<action name="monitor" depth="0"  timeout="20" interval="10" role="Master"/>
+<action name="meta-data"  timeout="5" />
+<action name="validate-all"  timeout="20" />
+</actions>
+</resource-agent>
+END
+	exit $OCF_SUCCESS
+}
+
+#######################################################################
+### Misc functions ###
+
+log_params()
+{
+	ocf_log info "ACTION=$__OCF_ACTION"
+	for param in `env | grep OCF | sort`
+	do 
+		ocf_log info "$param"
+	done
+}
+
+meta_expect()
+{
+	local what=$1 whatvar=OCF_RESKEY_CRM_meta_${1//-/_} op=$2 expect=$3
+	local val=${!whatvar}
+	if [[ -n $val ]]; then
+		# [, not [[, or it won't work ;)
+		[ $val $op $expect ] && return
+	fi
+	ocf_log err "meta parameter misconfigured, expected $what $op $expect, but found ${val:-unset}."
+	exit $OCF_ERR_CONFIGURED
+}
+
+check_config() {
+	if [ ! -r "$1" ] ; then
+		ocf_log err "Setup problem: Couldn't find config file $1"
+		exit $OCF_ERR_INSTALLED
+	fi
+}
+
+run_as_pg() {
+	ocf_log info "Run as $OCF_RESKEY_pgdba: $@"
+	output=`su $OCF_RESKEY_pgdba -c "$*" 2>&1`
+	rc=$?
+	output=`echo $output`
+	if [ $rc -eq 0 ]; then 
+	    if [ ! -z "$output" ]; then
+			ocf_log info "$output"
+	    fi
+	    return $OCF_SUCCESS
+	else
+	    if [ ! -z "$output" ]; then
+			ocf_log err "$output"
+	    else
+			ocf_log err "command failed: $*"
+	    fi
+	    return $OCF_ERR_GENERIC
+	fi
+}
+
+pg_check_pid() {
+	if [ -f $PIDFILE ]
+	then
+		PID=`head -n 1 $PIDFILE`
+		kill -0 $PID >/dev/null 2>&1 && fuser $OCF_RESKEY_pgdata 2>&1 | grep $PID >/dev/null 2>&1
+		return $?
+	fi
+	false
+}
+
+#######################################################################
+### repmgr interface ###
+
+run_repmgr() {
+	# pgctl should be in PATH (set it in /etc/login.defs or ~postgres/.profile)
+	ocf_log info "Run as $OCF_RESKEY_pgdba: ${OCF_RESKEY_repmgr} $@"
+	su --login $OCF_RESKEY_pgdba -c "${OCF_RESKEY_repmgr} $*" 2>&1 >> /dev/r.out
+	rc=$?
+	# 100 = master state
+	if [ $rc -ne 0 -a $rc -ne 100 ]; then 
+		ocf_log err "command failed: ${OCF_RESKEY_repmgr} $*"
+	fi
+    return $rc
+}
+
+pg_state_check() {
+	local status
+	if ! pg_check_pid
+	then
+		return $OCF_NOT_RUNNING
+	else
+		ocf_log info "PostgreSQL proccess exist..."
+	fi
+
+	run_repmgr -f ${OCF_RESKEY_repmgr_conf} state check
+	status=$?
+	case $status in
+		0)	 return $OCF_SUCCESS ;;
+		100) return $OCF_RUNNING_MASTER ;;
+		6|7) rc=$OCF_NOT_RUNNING ;; # ERR_DB_CON, ERR_DB_QUERY
+		1|9) rc=$OCF_ERR_INSTALLED ;; # ERR_BAD_CONFIG, ERR_BAD_PASSWORD
+		*)	# TODO: Is it need to return OCF_ERR_CONFIGURED for full shutdown of the resource?
+			ocf_log err "${OCF_RESOURCE_INSTANCE}: UNEXPECTED repmgr error ($status)!!!"
+			rc=$status ;;
+	esac
+	return $rc
+}
+
+pg_start() {
+	mkdir -p $SOCKETDIR &&	\
+	chown $OCF_RESKEY_pgdba. $SOCKETDIR && \
+	chmod 2775 $SOCKETDIR
+	run_as_pg ${OCF_RESKEY_pgctl} start -w -D ${OCF_RESKEY_pgdata} $OCF_RESKEY_ctl_opt -l ${OCF_RESKEY_logfile} -o "'-c config_file=${OCF_RESKEY_pgconfig}'" -o "'$OCF_RESKEY_start_opt'"
+	sleep 10
+}
+
+pg_stop() {
+	local status
+	run_as_pg ${OCF_RESKEY_pgctl} stop -m fast -D ${OCF_RESKEY_pgdata} -l ${OCF_RESKEY_logfile} -o "'-c config_file=${OCF_RESKEY_pgconfig}'"
+	# stop waiting
+	count=0
+	while [ $count -lt $OCF_RESKEY_stop_escalate ]
+	do
+		pg_state_check
+		status=$?
+		if [ "$status" -eq $OCF_NOT_RUNNING ]; then
+			#PostgreSQL stopped
+			break;
+		fi
+		count=`expr $count + 1`
+		sleep 1
+	done
+
+	if pg_check_pid
+	then
+		#PostgreSQL is still up. Use another shutdown mode.
+		ocf_log info "PostgreSQL failed to stop after ${OCF_RESKEY_stop_escalate}s using -m fast. Trying -m immediate..."
+		run_as_pg ${OCF_RESKEY_pgctl} stop -w -m immediate -D ${OCF_RESKEY_pgdata} -l ${OCF_RESKEY_logfile} -o "'-c config_file=${OCF_RESKEY_pgconfig}'"
+		while :
+		do
+			pg_check_pid || break
+			sleep 1
+			ocf_log debug "PostgreSQL still hasn't stopped yet. Waiting..."
+		done
+	fi
+
+    rm -f $PIDFILE
+    ocf_log info "PostgreSQL is stopped"
+	return $OCF_SUCCESS
+}
+
+pg_promote() {
+	local status
+	run_repmgr -f ${OCF_RESKEY_repmgr_conf} --verbose --force standby promote
+	status=$?
+	case $status in
+		0) return $OCF_SUCCESS ;;
+		6|7) rc=$OCF_NOT_RUNNING ;; # ERR_DB_CON, ERR_DB_QUERY
+		1|9) rc=$OCF_ERR_INSTALLED ;; # ERR_BAD_CONFIG, ERR_BAD_PASSWORD
+		4) rc=$OCF_ERR_GENERIC ;; # ERR_NO_RESTART
+		*) rc=$OCF_ERR_GENERIC ;;
+	esac
+	ocf_log err "${OCF_RESOURCE_INSTANCE}: Promoting failed ($status)"
+	return $rc
+}
+
+pg_follow_master() {
+	run_repmgr -f ${OCF_RESKEY_repmgr_conf} standby follow
+}
+
+pg_clone_master() {
+	run_repmgr -D ${OCF_RESKEY_pgdata} ${OCF_RESKEY_repmgr_clone_opt} --force standby clone $1 || return $OCF_ERR_INSTALLED
+}
+
+pg_demote() {
+	new_master=$1
+	run_repmgr --verbose standby clone $new_master 
+}
+
+#######################################################################
+### OCF RA interface ###
+
+rename_data() {
+	if [ -d ${OCF_RESKEY_pgdata} ]; then
+		new_name="`dirname ${OCF_RESKEY_pgdata}`/`basename ${OCF_RESKEY_pgdata}`-`date +%Y%m%d-%H:%M:%S`"
+		if [ -d $new_name ] ; then
+			new_name="`dirname ${OCF_RESKEY_pgdata}`/`basename ${OCF_RESKEY_pgdata}`-`date +%Y%m%d-%H:%M:%S-%N`"
+		fi
+		 
+		if mv ${OCF_RESKEY_pgdata} $new_name ; then
+			ocf_log info "${OCF_RESOURCE_INSTANCE} Data dir ${OCF_RESKEY_pgdata} saved as $new_name"
+		else
+			ocf_log err "${OCF_RESOURCE_INSTANCE} Cannot rename data dir ${OCF_RESKEY_pgdata} to $new_name"
+			return $OCF_ERR_INSTALLED
+		fi
+	fi
+}
+
+pgsql_start() {
+	local status
+	ocf_log info "${OCF_RESOURCE_INSTANCE}: Starting"
+	pg_state_check
+	status=$? 
+	case "$status" in
+		$OCF_RUNNING_MASTER)
+			ocf_log warn "${OCF_RESOURCE_INSTANCE} already started as Primary."
+			;;
+		$OCF_SUCCESS)
+			ocf_log warn "${OCF_RESOURCE_INSTANCE} already started as Standby."
+			;;
+		$OCF_NOT_RUNNING)
+			log_params
+			# $OCF_RESKEY_CRM_meta_notify_master_uname can be ' '
+			if [ "$OCF_RESKEY_CRM_meta_notify_master_uname" != ' ' -a "$OCF_RESKEY_CRM_meta_notify_master_uname" != '`$HOSTNAME`' ] ; then
+				ocf_log info "${OCF_RESOURCE_INSTANCE} Master instance exist on host ${OCF_RESKEY_CRM_meta_notify_master_uname}" 
+				if [ ! -f ${OCF_RESKEY_pgdata}/recovery.conf ] ; then
+					ocf_log warn "${OCF_RESOURCE_INSTANCE} recovery.conf file not found. I think this is old Master. Start cloning the current Master..." 
+					rename_data &&
+						pg_clone_master $OCF_RESKEY_CRM_meta_notify_master_uname ||
+							return $?
+				fi
+			fi
+			pg_start
+			pg_state_check
+			status=$?
+			if [ "$status" = $OCF_RUNNING_MASTER ] ; then
+				ocf_log warn "${OCF_RESOURCE_INSTANCE} started as Master"
+			elif [ "$status" = $OCF_SUCCESS ] ; then
+				ocf_log info "${OCF_RESOURCE_INSTANCE} started as Standby"
+			else
+				ocf_log err "${OCF_RESOURCE_INSTANCE} Unexpected status ($status) of node at start action"
+				return $status
+			fi
+			;;
+		*)
+			ocf_log err "${OCF_RESOURCE_INSTANCE} Unexpected status ($status) of node at start action"
+			#$CRM_MASTER -D
+			return $status
+			;;
+	esac
+	$CRM_MASTER -v ${OCF_RESKEY_slave_score}
+	return $OCF_SUCCESS
+}
+
+pgsql_promote() {
+	local status
+	ocf_log info "${OCF_RESOURCE_INSTANCE}: Promoting"
+	pg_state_check 
+	status=$? 
+	case "$status" in
+		$OCF_RUNNING_MASTER)
+			ocf_log warn "${OCF_RESOURCE_INSTANCE} already started as Primary."
+			;;
+		$OCF_SUCCESS)
+			pg_promote
+			status=$?
+			if [ $status = $OCF_RUNNING_MASTER ] ; then
+				ocf_log warn "${OCF_RESOURCE_INSTANCE} started as Primary."
+			else
+				#$CRM_MASTER -D
+				return $status
+			fi
+			;;
+		$OCF_NOT_RUNNING)
+			#$CRM_MASTER -D
+			return $status
+			;;
+		*)
+			ocf_log err "${OCF_RESOURCE_INSTANCE} Unexpected status ($status) of node at promote action."
+			#$CRM_MASTER -D
+			return $status
+	esac
+	$CRM_MASTER -v ${OCF_RESKEY_master_score}
+	return $OCF_SUCCESS
+}
+
+pgsql_demote() {
+	# We cannot switch to standby if another master not started yet
+	local status
+	ocf_log info "${OCF_RESOURCE_INSTANCE}: Demoting"
+	$CRM_MASTER -D
+	pg_state_check
+	status=$? 
+	case "$status" in
+		$OCF_RUNNING_MASTER)
+			log_params
+			pg_stop
+			pg_state_check
+			status=$?
+			if [ "$status" = $OCF_NOT_RUNNING ] ; then
+				return $OCF_SUCCESS
+			elif [ "$status" = $OCF_RUNNING_MASTER -o "$status" = $OCF_SUCCESS ] ; then
+				ocf_log warn "${OCF_RESOURCE_INSTANCE} Cannot stop resource, still runned"
+				return $OCF_ERR_GENERIC
+			fi
+			return $OCF_SUCCESS
+			;;
+		$OCF_SUCCESS)
+			ocf_log warn "${OCF_RESOURCE_INSTANCE} already Standby."
+			return $OCF_SUCCESS
+			;;
+		$OCF_NOT_RUNNING)
+			ocf_log err "Trying to demote a resource that was not started"
+			return $OCF_NOT_RUNNING
+			;;
+		*)
+			ocf_log err "${OCF_RESOURCE_INSTANCE} Unexpected status ($status) of node at demote action. Score will removed"
+			;;
+	esac
+	return $status
+}
+
+pgsql_stop() {
+	local status
+	ocf_log info "${OCF_RESOURCE_INSTANCE}: Stopping"
+	$CRM_MASTER -D
+	pg_state_check
+	status=$? 
+	case "$status" in
+		$OCF_RUNNING_MASTER | $OCF_SUCCESS)
+			pg_stop
+			pg_state_check
+			status=$?
+			if [ "$status" = $OCF_NOT_RUNNING ] ; then
+				return $OCF_SUCCESS
+			elif [ "$status" = $OCF_RUNNING_MASTER -o "$status" = $OCF_SUCCESS ] ; then
+				ocf_log warn "${OCF_RESOURCE_INSTANCE} Cannot stop resource, still runned"
+				return $OCF_ERR_GENERIC
+			fi
+			;;
+		$OCF_NOT_RUNNING)
+			ocf_log err "${OCF_RESOURCE_INSTANCE} Trying to stop a resource that was not started"
+			return $OCF_SUCCESS
+			;;
+		*)
+			ocf_log err "${OCF_RESOURCE_INSTANCE} Unexpected status ($status) of node at stop action. Score will removed"
+			;;
+	esac
+	return $status
+}
+
+pgsql_monitor() {
+	local status
+	pg_state_check
+	status=$? 
+	case "$status" in
+		$OCF_RUNNING_MASTER)
+			ocf_log info "${OCF_RESOURCE_INSTANCE} PostgreSQL in Master mode"
+			$CRM_MASTER -v ${OCF_RESKEY_master_score}
+			;;
+		$OCF_SUCCESS)
+			ocf_log info "${OCF_RESOURCE_INSTANCE} PostgreSQL in Standby mode"
+			$CRM_MASTER -v ${OCF_RESKEY_slave_score}
+			;;
+		$OCF_NOT_RUNNING)
+			ocf_log info "${OCF_RESOURCE_INSTANCE} PostgreSQL is not runned"
+			$CRM_MASTER -D
+			;;
+		*)
+			ocf_log err "${OCF_RESOURCE_INSTANCE} Unexpected status ($status)"
+			$CRM_MASTER -D
+			;;
+	esac
+	return $status
+}
+
+pgsql_validate_all() {
+	meta_expect master-max -le 1
+	meta_expect clone-node-max = 1
+	meta_expect master-node-max = 1
+	if [ $__OCF_ACTION != "monitor" -a "${OCF_RESKEY_CRM_meta_notify_start_uname- NOT SET }" = " NOT SET " ]; then
+		ocf_log err "you should enable notify when using this RA"
+		log_params
+		return $OCF_ERR_CONFIGURED
+	fi
+
+	check_binary fuser
+	check_binary $OCF_RESKEY_pgctl
+	check_binary $OCF_RESKEY_psql
+	check_binary $OCF_RESKEY_repmgr
+	check_config $OCF_RESKEY_pgconfig
+	check_config $OCF_RESKEY_repmgr_conf
+	
+	if ! su --login $OCF_RESKEY_pgdba -c "type -p `basename $OCF_RESKEY_pgctl`" > /dev/null ; then
+		ocf_log err "`basename $OCF_RESKEY_pgctl` should be in PATH for user $OCF_RESKEY_pgdba"
+		return $OCF_ERR_INSTALLED
+	fi
+	
+	return $OCF_SUCCESS
+}
+
+pgsql_notify() {
+	local n_type=$OCF_RESKEY_CRM_meta_notify_type
+	local n_op=$OCF_RESKEY_CRM_meta_notify_operation
+
+	# post/promote: slave follow new master
+
+	ocf_log info "${OCF_RESOURCE_INSTANCE}: NOTIFY $n_type/$n_op"
+	#log_params
+	return $OCF_SUCCESS
+}
+
+pgsql_usage() {
+	cat <<END
+usage: $0 {start|stop|promote|demote|monitor|validate-all|meta-data}
+
+Expects to have a fully populated OCF RA-compliant environment set.
+END
+	exit $1
+}
+
+#######################################################################
+### Main ###
+
+if [ $# -ne 1 ]; then
+	usage
+	exit $OCF_ERR_ARGS
+fi
+
+case $__OCF_ACTION in
+	meta-data)
+		meta_data
+		exit $OCF_SUCCESS;;
+	usage|help)
+		pgsql_usage $OCF_SUCCESS;;
+esac
+
+pgsql_validate_all || exit
+
+case $__OCF_ACTION in
+	start)		pgsql_start;;
+	promote)	pgsql_promote;;
+	demote)		pgsql_demote;;
+	stop)		pgsql_stop;;
+	notify)		pgsql_notify;;
+	monitor)	pgsql_monitor;;
+	validate-all) ;;
+	*)			pgsql_usage $OCF_ERR_UNIMPLEMENTED;;
+esac
+
+exit
+

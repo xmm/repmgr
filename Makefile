@@ -53,5 +53,5 @@ deb: repmgrd repmgr
 	cp README.rst COPYRIGHT CREDITS HISTORY LICENSE TODO ./debian/usr/share/postgresql-repmgr
 	cp *.sql ./debian/usr/share/postgresql-repmgr
 	dpkg-deb --build debian
-	mv debian.deb ../postgresql-repmgr-9.0_1.1.0.deb
+	mv debian.deb ../postgresql-repmgr-9.0_1.1.1.deb
 
