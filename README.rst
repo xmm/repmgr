@@ -1,3 +1,9 @@
+================================
+OCF Resource Agent for Pacemaker
+================================
+Look to a wiki of the project https://github.com/xmm/repmgr/wiki
+for information about how to configure pacemaker with repmgr
+
 ===================================================
 repmgr: Replication Manager for PostgreSQL clusters
 ===================================================
